@@ -1,0 +1,111 @@
+version: '3.8'
+
+services:
+  # MinIO - Stockage objet S3-like
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    ports:
+      - "9002:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # MinIO Client pour initialisation
+  mc:
+    image: minio/mc:latest
+    container_name: mc
+    depends_on:
+      - minio
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - ./scripts:/scripts
+    command: sh -c "
+      sleep 10 &&
+      mc alias set myminio http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD} &&
+      mc mb myminio/datalake-bronze &&
+      mc mb myminio/datalake-silver &&
+      mc mb myminio/datalake-gold &&
+      mc policy set public myminio/datalake-bronze &&
+      mc policy set public myminio/datalake-silver &&
+      mc policy set public myminio/datalake-gold &&
+      echo 'Buckets créés avec succès!'"
+
+  # Service ETL Python
+  etl:
+    build:
+      context: .
+      dockerfile: Dockerfile.etl
+    container_name: etl
+    depends_on:
+      - minio
+    environment:
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      MINIO_SECURE: "false"
+    volumes:
+      - ./src:/app/src
+      - ./data:/app/data
+      - ./scripts:/app/scripts
+    working_dir: /app
+    command: tail -f /dev/null  # Garde le container en vie
+
+  # JupyterLab Notebook
+  notebook:
+    build:
+      context: .
+      dockerfile: Dockerfile.notebook
+    container_name: notebook
+    ports:
+      - "8888:8888"
+    depends_on:
+      - minio
+    environment:
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      MINIO_SECURE: "false"
+    volumes:
+      - ./src:/app/src
+      - ./data:/app/data
+      - ./notebooks:/app/notebooks
+      - ./scripts:/app/scripts
+    working_dir: /app
+    command: jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root --NotebookApp.token='' --NotebookApp.password=''
+
+  # Dashboard Streamlit
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    container_name: dashboard
+    ports:
+      - "8501:8501"
+    depends_on:
+      - minio
+    environment:
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      MINIO_SECURE: "false"
+    volumes:
+      - ./src:/app/src
+      - ./data:/app/data
+      - ./scripts:/app/scripts
+    working_dir: /app
+    command: streamlit run src/visualization/dashboard.py --server.port=8501 --server.address=0.0.0.0
+
+volumes:
+  minio_data:
