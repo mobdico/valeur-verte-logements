@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Script de vérification des données dans MinIO (BRONZE)
+Script de vérification des données dans MinIO (BRONZE ET SILVER)
 - Liste récursive avec pagination
 - Regroupe par dossiers
 - Vérifie la structure attendue (DPE & DVF)
@@ -11,6 +11,7 @@ from botocore.exceptions import ClientError
 from datetime import datetime
 
 BUCKET = "datalake-bronze"
+SILVER_BUCKET = "datalake-silver"  # Nouveau bucket
 
 def list_all_objects(s3_client, bucket, prefix=""):
     """Itère sur tous les objets du bucket (paginé)."""
@@ -131,5 +132,70 @@ def verify_minio_data():
 
     print(f"\n🎯 BRONZE prêt si les dossiers attendus sont présents.")
 
+def verify_silver_data():
+    """Vérifie la structure et le contenu du bucket SILVER"""
+    s3_client = boto3.client(
+        's3',
+        endpoint_url='http://minio:9000',
+        aws_access_key_id='admin',
+        aws_secret_access_key='password123',
+        region_name='us-east-1'
+    )
+    
+    print("\n🔍 VÉRIFICATION COMPLÈTE DES DONNÉES MINIO (SILVER)")
+    print("=" * 70)
+    
+    try:
+        s3_client.head_bucket(Bucket=SILVER_BUCKET)
+    except ClientError as e:
+        print(f"❌ Bucket {SILVER_BUCKET} introuvable ou inaccessible: {e}")
+        return
+    
+    # Vérifier structure dvf/ et dpe/
+    verify_silver_structure(s3_client)
+
+def verify_silver_structure(s3_client):
+    """Vérifie la structure des données SILVER"""
+    print("📂 VÉRIFICATION STRUCTURE SILVER:")
+    
+    # Vérifier DVF
+    dvf_objects = list(list_all_objects(s3_client, SILVER_BUCKET, "dvf/"))
+    if dvf_objects:
+        print("✅ DVF/ présent")
+        print(f"  📊 Total objets DVF: {len(dvf_objects)}")
+        for obj in dvf_objects[:5]:  # Premiers 5 objets
+            print(f"    📄 {obj['Key']} - {obj['Size']:,} bytes")
+        if len(dvf_objects) > 5:
+            print(f"    ... et {len(dvf_objects) - 5} autres objets")
+    else:
+        print("❌ DVF/ absent")
+    
+    # Vérifier DPE
+    dpe_objects = list(list_all_objects(s3_client, SILVER_BUCKET, "dpe/"))
+    if dpe_objects:
+        print("✅ DPE/ présent")
+        print(f"  📊 Total objets DPE: {len(dpe_objects)}")
+        for obj in dpe_objects[:5]:  # Premiers 5 objets
+            print(f"    📄 {obj['Key']} - {obj['Size']:,} bytes")
+        if len(dpe_objects) > 5:
+            print(f"    ... et {len(dpe_objects) - 5} autres objets")
+    else:
+        print("❌ DPE/ absent")
+    
+    # Statistiques globales SILVER
+    total_silver_objects = len(dvf_objects) + len(dpe_objects)
+    total_silver_size = sum(obj['Size'] for obj in dvf_objects + dpe_objects)
+    
+    print(f"\n📊 STATISTIQUES SILVER")
+    print("-" * 40)
+    print(f"📄 Total objets: {total_silver_objects}")
+    print(f"💾 Taille totale: {total_silver_size:,} bytes ({total_silver_size/1024/1024:.2f} MB)")
+    
+    if total_silver_objects > 0:
+        print(f"\n🎯 SILVER prêt avec {total_silver_objects} objets transformés.")
+    else:
+        print(f"\n⚠️ SILVER vide - transformation non effectuée.")
+
 if __name__ == "__main__":
-    verify_minio_data()
+    verify_minio_data()      # BRONZE
+    verify_silver_data()     # SILVER
