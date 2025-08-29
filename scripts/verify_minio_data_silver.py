@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Script de vérification des données dans MinIO (BRONZE)
+Script de vérification des données dans MinIO (SILVER)
 - Liste récursive avec pagination
 - Regroupe par dossiers
-- Vérifie la structure attendue (DPE & DVF)
+- Vérifie la structure attendue (DPE & DVF transformés)
 """
 
 import boto3
 from botocore.exceptions import ClientError
 from datetime import datetime
 
-BUCKET = "datalake-bronze"
+BUCKET = "datalake-silver"
 
 def list_all_objects(s3_client, bucket, prefix=""):
     """Itère sur tous les objets du bucket (paginé)."""
@@ -19,7 +19,7 @@ def list_all_objects(s3_client, bucket, prefix=""):
         for c in page.get('Contents', []):
             yield c
 
-def verify_minio_data():
+def verify_minio_data_silver():
     # Client MinIO (dans Docker)
     s3_client = boto3.client(
         's3',
@@ -29,7 +29,7 @@ def verify_minio_data():
         region_name='us-east-1'
     )
 
-    print("🔍 VÉRIFICATION COMPLÈTE DES DONNÉES MINIO (BRONZE)")
+    print("🔍 VÉRIFICATION COMPLÈTE DES DONNÉES MINIO (SILVER)")
     print("=" * 70)
 
     try:
@@ -111,12 +111,12 @@ def verify_minio_data():
     print(f"💾 Taille totale  : {total_size:,} bytes ({total_size/1024/1024:.2f} MB)")
     print(f"📅 Vérifié le     : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-    # Structure attendue
-    print(f"\n✅ VÉRIFICATION DE LA STRUCTURE ATTENDUE")
+    # Structure attendue pour SILVER
+    print(f"\n✅ VÉRIFICATION DE LA STRUCTURE ATTENDUE (SILVER)")
     print("=" * 70)
     expected = {
-        'dpe': ['92', '59', '34'],
-        'dvf': ['2020', '2021']
+        'dpe': ['departement_code=92', 'departement_code=59', 'departement_code=34'],
+        'dvf': ['annee=2020', 'annee=2021']
     }
     for root, subs in expected.items():
         if root in folders:
@@ -129,7 +129,39 @@ def verify_minio_data():
         else:
             print(f"❌ {root}/ MANQUANT")
 
-    print(f"\n🎯 BRONZE prêt si les dossiers attendus sont présents.")
+    # Vérification des colonnes attendues
+    print(f"\n🔍 VÉRIFICATION DES COLONNES ATTENDUES")
+    print("=" * 70)
+    
+    # Vérifier un échantillon DPE
+    dpe_files = [f for f in list_all_objects(s3_client, BUCKET, "dpe/") if f['Key'].endswith('.parquet')]
+    if dpe_files:
+        sample_dpe = dpe_files[0]['Key']
+        print(f"📖 Échantillon DPE: {sample_dpe}")
+        try:
+            import pandas as pd
+            obj = s3_client.get_object(Bucket=BUCKET, Key=sample_dpe)
+            df = pd.read_parquet(obj['Body'])
+            print(f"  📊 Colonnes DPE: {list(df.columns)}")
+            print(f"  📊 Lignes: {len(df):,}")
+        except Exception as e:
+            print(f"  ❌ Erreur lecture: {e}")
+    
+    # Vérifier un échantillon DVF
+    dvf_files = [f for f in list_all_objects(s3_client, BUCKET, "dvf/") if f['Key'].endswith('.parquet')]
+    if dvf_files:
+        sample_dvf = dvf_files[0]['Key']
+        print(f"📖 Échantillon DVF: {sample_dvf}")
+        try:
+            import pandas as pd
+            obj = s3_client.get_object(Bucket=BUCKET, Key=sample_dvf)
+            df = pd.read_parquet(obj['Body'])
+            print(f"  📊 Colonnes DVF: {list(df.columns)}")
+            print(f"  📊 Lignes: {len(df):,}")
+        except Exception as e:
+            print(f"  ❌ Erreur lecture: {e}")
+
+    print(f"\n🎯 SILVER prêt si les dossiers attendus sont présents et les colonnes correctes.")
 
 if __name__ == "__main__":
-    verify_minio_data()
+    verify_minio_data_silver()
