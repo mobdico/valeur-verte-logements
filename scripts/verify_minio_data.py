@@ -1,18 +1,26 @@
 #!/usr/bin/env python3
 """
-Script de vérification des données dans MinIO
-Vérifie la structure et le contenu des données DPE et DVF ingérées
+Script de vérification des données dans MinIO (BRONZE)
+- Liste récursive avec pagination
+- Regroupe par dossiers
+- Vérifie la structure attendue (DPE & DVF)
 """
 
 import boto3
-import json
 from botocore.exceptions import ClientError
 from datetime import datetime
 
+BUCKET = "datalake-bronze"
+
+def list_all_objects(s3_client, bucket, prefix=""):
+    """Itère sur tous les objets du bucket (paginé)."""
+    paginator = s3_client.get_paginator('list_objects_v2')
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for c in page.get('Contents', []):
+            yield c
+
 def verify_minio_data():
-    """Vérifie toutes les données dans MinIO"""
-    
-    # Configuration MinIO
+    # Client MinIO (dans Docker)
     s3_client = boto3.client(
         's3',
         endpoint_url='http://minio:9000',
@@ -20,118 +28,108 @@ def verify_minio_data():
         aws_secret_access_key='password123',
         region_name='us-east-1'
     )
-    
-    print("🔍 VÉRIFICATION COMPLÈTE DES DONNÉES MINIO")
-    print("=" * 60)
-    
+
+    print("🔍 VÉRIFICATION COMPLÈTE DES DONNÉES MINIO (BRONZE)")
+    print("=" * 70)
+
     try:
-        # Lister tous les objets dans le bucket
-        response = s3_client.list_objects_v2(Bucket='datalake-bronze')
-        
-        if 'Contents' not in response:
-            print("❌ Bucket vide ou erreur")
-            return
-        
-        # Grouper par dossier
-        folders = {}
-        for obj in response['Contents']:
-            key = obj['Key']
-            size = obj['Size']
-            last_modified = obj['LastModified']
-            
-            # Extraire le dossier principal et sous-dossier
-            parts = key.split('/')
-            main_folder = parts[0] if len(parts) > 0 else key
-            sub_folder = parts[1] if len(parts) > 1 else None
-            
-            if main_folder not in folders:
-                folders[main_folder] = {}
-            
-            if sub_folder not in folders[main_folder]:
-                folders[main_folder][sub_folder] = []
-            
-            folders[main_folder][sub_folder].append({
-                'key': key,
-                'size': size,
-                'last_modified': last_modified
-            })
-        
-        # Afficher par dossier
-        total_files = 0
-        total_size = 0
-        
-        for main_folder, sub_folders in folders.items():
-            print(f"\n📂 {main_folder.upper()}/")
-            print("-" * 40)
-            
-            main_folder_files = 0
-            main_folder_size = 0
-            
-            for sub_folder, files in sub_folders.items():
-                if sub_folder:
-                    print(f"  📁 {sub_folder}/")
-                
-                sub_folder_files = 0
-                sub_folder_size = 0
-                
-                for file_info in files:
-                    key = file_info['key']
-                    size = file_info['size']
-                    modified = file_info['last_modified']
-                    
-                    # Afficher le nom du fichier (sans le chemin complet)
-                    filename = key.split('/')[-1]
-                    print(f"    📄 {filename}")
-                    print(f"        💾 Taille: {size:,} bytes ({size/1024/1024:.2f} MB)")
-                    print(f"        📅 Modifié: {modified.strftime('%Y-%m-%d %H:%M:%S')}")
-                    
-                    sub_folder_files += 1
-                    sub_folder_size += size
-                
-                if sub_folder:
-                    print(f"    📊 Sous-dossier {sub_folder}: {sub_folder_files} fichiers, {sub_folder_size:,} bytes")
-                
-                main_folder_files += sub_folder_files
-                main_folder_size += sub_folder_size
-            
-            print(f"  📊 Dossier {main_folder}: {main_folder_files} fichiers, {main_folder_size:,} bytes")
-            
-            total_files += main_folder_files
-            total_size += main_folder_size
-        
-        # Statistiques globales
-        print(f"\n📊 STATISTIQUES GLOBALES")
-        print("=" * 60)
-        print(f"📄 Total fichiers: {total_files}")
-        print(f"💾 Taille totale: {total_size:,} bytes ({total_size/1024/1024:.2f} MB)")
-        print(f"📅 Vérification effectuée: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        
-        # Vérification de la structure attendue
-        print(f"\n✅ VÉRIFICATION DE LA STRUCTURE")
-        print("=" * 60)
-        
-        expected_structure = {
-            'dpe': ['92', '59', '34'],
-            'dvf': ['2020', '2021']
-        }
-        
-        for expected_folder, expected_subfolders in expected_structure.items():
-            if expected_folder in folders:
-                print(f"✅ {expected_folder}/ - Présent")
-                for subfolder in expected_subfolders:
-                    if subfolder in folders[expected_folder]:
-                        print(f"  ✅ {expected_folder}/{subfolder}/ - Présent")
-                    else:
-                        print(f"  ❌ {expected_folder}/{subfolder}/ - MANQUANT")
-            else:
-                print(f"❌ {expected_folder}/ - MANQUANT")
-        
-        print(f"\n🎯 PARTIE B - INGESTION BRONZE: {'✅ TERMINÉE' if total_files >= 8 else '❌ INCOMPLÈTE'}")
-        
+        # Test bucket
+        s3_client.head_bucket(Bucket=BUCKET)
     except ClientError as e:
-        print(f"❌ Erreur MinIO: {e}")
-    except Exception as e:
-        print(f"❌ Erreur générale: {e}")
+        print(f"❌ Bucket {BUCKET} introuvable ou inaccessible: {e}")
+        return
+
+    # Regroupement par dossiers
+    folders = {}
+    total_files = 0
+    total_size = 0
+
+    for obj in list_all_objects(s3_client, BUCKET):
+        key = obj['Key']
+        size = obj['Size']
+        last_modified = obj['LastModified']
+
+        parts = key.split('/')
+        main_folder = parts[0] if len(parts) > 0 else key
+        sub_folder = parts[1] if len(parts) > 1 else None
+
+        folders.setdefault(main_folder, {})
+        folders[main_folder].setdefault(sub_folder, [])
+        folders[main_folder][sub_folder].append({
+            'key': key,
+            'size': size,
+            'last_modified': last_modified
+        })
+
+        total_files += 1
+        total_size += size
+
+    if total_files == 0:
+        print("❌ Bucket vide.")
+        return
+
+    # Affichage par dossier
+    for main_folder, sub in folders.items():
+        print(f"\n📂 {main_folder.upper()}/")
+        print("-" * 40)
+
+        main_files = 0
+        main_size = 0
+
+        for sub_folder, files in sub.items():
+            if sub_folder:
+                print(f"  📁 {sub_folder}/")
+
+            sub_files = 0
+            sub_size = 0
+
+            for f in files:
+                key = f['key']
+                size = f['size']
+                modified = f['last_modified']
+                filename = key.split('/')[-1]
+
+                print(f"    📄 {filename}")
+                print(f"        💾 {size:,} bytes ({size/1024/1024:.2f} MB)")
+                print(f"        📅 {modified.strftime('%Y-%m-%d %H:%M:%S')}")
+
+                sub_files += 1
+                sub_size += size
+
+            if sub_folder:
+                print(f"    📊 {sub_folder}/ : {sub_files} fichiers, {sub_size:,} bytes")
+
+            main_files += sub_files
+            main_size += sub_size
+
+        print(f"  📊 {main_folder}/ : {main_files} fichiers, {main_size:,} bytes")
+
+    # Stat globales
+    print(f"\n📊 STATISTIQUES GLOBALES")
+    print("=" * 70)
+    print(f"📄 Total fichiers : {total_files}")
+    print(f"💾 Taille totale  : {total_size:,} bytes ({total_size/1024/1024:.2f} MB)")
+    print(f"📅 Vérifié le     : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+    # Structure attendue
+    print(f"\n✅ VÉRIFICATION DE LA STRUCTURE ATTENDUE")
+    print("=" * 70)
+    expected = {
+        'dpe': ['92', '59', '34'],
+        'dvf': ['2020', '2021']
+    }
+    for root, subs in expected.items():
+        if root in folders:
+            print(f"✅ {root}/ présent")
+            for s in subs:
+                if s in folders[root]:
+                    print(f"  ✅ {root}/{s}/ présent")
+                else:
+                    print(f"  ❌ {root}/{s}/ MANQUANT")
+        else:
+            print(f"❌ {root}/ MANQUANT")
+
+    print(f"\n🎯 BRONZE prêt si les dossiers attendus sont présents.")
 
 if __name__ == "__main__":
     verify_minio_data()

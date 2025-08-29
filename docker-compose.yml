@@ -1,4 +1,4 @@
-version: '3.8'
+version: "3.8"
 
 services:
   # MinIO - Stockage objet S3-like
@@ -6,8 +6,8 @@ services:
     image: minio/minio:latest
     container_name: minio
     ports:
-      - "9002:9000"
-      - "9001:9001"
+      - "9002:9000"   # API S3 depuis l'hôte: http://localhost:9002
+      - "9001:9001"   # Console web MinIO: http://localhost:9001
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
@@ -20,7 +20,7 @@ services:
       timeout: 20s
       retries: 3
 
-  # MinIO Client pour initialisation
+  # MinIO Client pour initialisation (création des buckets/policies)
   mc:
     image: minio/mc:latest
     container_name: mc
@@ -31,16 +31,28 @@ services:
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
     volumes:
       - ./scripts:/scripts
-    command: sh -c "
-      sleep 10 &&
-      mc alias set myminio http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD} &&
-      mc mb myminio/datalake-bronze &&
-      mc mb myminio/datalake-silver &&
-      mc mb myminio/datalake-gold &&
-      mc policy set public myminio/datalake-bronze &&
-      mc policy set public myminio/datalake-silver &&
-      mc policy set public myminio/datalake-gold &&
-      echo 'Buckets créés avec succès!'"
+    entrypoint: ["/bin/sh", "-c"]   # ✅ forcer un shell (sinon 'command' est passé à 'mc')
+    command: |
+      set -e
+      # Attente que MinIO soit prêt
+      for i in $(seq 1 30); do
+        mc alias set myminio http://minio:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" && break
+        echo "MinIO pas prêt, retry ($i/30)..." && sleep 2
+      done
+
+      # Buckets (idempotent)
+      mc mb myminio/datalake-bronze || true
+      mc mb myminio/datalake-silver || true
+      mc mb myminio/datalake-gold   || true
+
+      # Politiques (selon version mc, 'policy set public' ou 'anonymous set download')
+      mc policy set public myminio/datalake-bronze  || mc anonymous set download myminio/datalake-bronze  || true
+      mc policy set public myminio/datalake-silver  || mc anonymous set download myminio/datalake-silver  || true
+      mc policy set public myminio/datalake-gold    || mc anonymous set download myminio/datalake-gold    || true
+
+      echo "Buckets créés avec succès!"
+      # Garder le conteneur vivant pour pouvoir faire 'docker compose exec mc ...'
+      tail -f /dev/null
 
   # Service ETL Python
   etl:
@@ -50,8 +62,9 @@ services:
     container_name: etl
     depends_on:
       - minio
+      - mc
     environment:
-      MINIO_ENDPOINT: minio:9000
+      MINIO_ENDPOINT: minio:9000     # depuis les conteneurs, on vise le service Docker
       MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
       MINIO_SECURE: "false"
@@ -60,7 +73,7 @@ services:
       - ./data:/app/data
       - ./scripts:/app/scripts
     working_dir: /app
-    command: tail -f /dev/null  # Garde le container en vie
+    command: tail -f /dev/null  # garde le container en vie
 
   # JupyterLab Notebook
   notebook:

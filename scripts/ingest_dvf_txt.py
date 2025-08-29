@@ -1,168 +1,131 @@
 #!/usr/bin/env python3
 """
-Script d'ingestion des données DVF depuis les fichiers TXT
-Ingestion BRONZE - Format natif TXT sans typage agressif
+Script d'ingestion des données DVF depuis les fichiers TXT/CSV
+Ingestion BRONZE - Format natif (brut) sans typage agressif
 """
 
 import os
-import shutil
+os.makedirs("logs", exist_ok=True)
+
 import logging
 from pathlib import Path
 from datetime import datetime
-import glob
 import boto3
 from botocore.exceptions import ClientError
 
-# Configuration du logging
+# Logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('logs/dvf_txt.log'),
-        logging.StreamHandler()  # Garde l'affichage console
+        logging.FileHandler('logs/dvf_txt.log', encoding='utf-8'),
+        logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
 
 class DVFIngestion:
-    def __init__(self, 
+    def __init__(self,
                  source_dir="data/raw/dvf",
                  bucket_name="datalake-bronze"):
+
         self.source_dir = Path(source_dir)
         self.bucket_name = bucket_name
-        
-        # Configuration MinIO
+
+        # MinIO (dans Docker)
         self.s3_client = boto3.client(
             's3',
-            endpoint_url='http://minio:9000',  # Nom du service Docker
+            endpoint_url='http://minio:9000',
             aws_access_key_id='admin',
             aws_secret_access_key='password123',
             region_name='us-east-1'
         )
-        
-        # Créer le bucket s'il n'existe pas
+
+        # Création du bucket si besoin
         try:
             self.s3_client.head_bucket(Bucket=self.bucket_name)
             logger.info(f"Bucket {self.bucket_name} existe déjà")
         except ClientError as e:
-            if e.response['Error']['Code'] == '404':
+            code = e.response.get("Error", {}).get("Code", "")
+            if code in ("404", "NoSuchBucket"):
                 logger.info(f"Création du bucket {self.bucket_name}")
                 self.s3_client.create_bucket(Bucket=self.bucket_name)
             else:
-                raise e
-    
+                raise
+
     def find_dvf_files(self):
-        """Trouve tous les fichiers DVF dans le dossier source"""
-        # Recherche des fichiers TXT et CSV
+        """Trouve tous les fichiers DVF brut dans le dossier source"""
         patterns = ["*.txt", "*.TXT", "*.csv", "*.CSV"]
         files = []
-        
         for pattern in patterns:
             files.extend(self.source_dir.glob(pattern))
-        
         logger.info(f"Trouvés {len(files)} fichiers DVF dans {self.source_dir}")
         return files
-    
-    def determine_year_from_filename(self, filename):
-        """Détermine l'année à partir du nom de fichier"""
-        filename_lower = filename.name.lower()  # ✅ .name pour obtenir le nom du fichier
-        
-        # Recherche d'années dans le nom de fichier
-        if "2020" in filename_lower:
-            return "2020"
-        elif "2021" in filename_lower:
-            return "2021"
-        elif "2022" in filename_lower:
-            return "2022"
-        elif "2023" in filename_lower:
-            return "2023"
-        else:
-            # Si pas d'année dans le nom, on utilise la date de modification
-            stat = filename.stat()
-            mod_time = datetime.fromtimestamp(stat.st_mtime)
-            return str(mod_time.year)
-    
-    def upload_to_minio(self, source_file, year):
-        """Uploade le fichier vers MinIO"""
-        # Nom du fichier de destination avec année et timestamp
+
+    def determine_year_from_filename(self, path: Path) -> str:
+        """Détermine l'année à partir du nom du fichier (fallback: mtime)"""
+        name = path.name.lower()
+        for y in ("2020", "2021", "2022", "2023"):
+            if y in name:
+                return y
+        mod_time = datetime.fromtimestamp(path.stat().st_mtime)
+        return str(mod_time.year)
+
+    def upload_to_minio(self, source_file: Path, year: str):
+        """Upload du fichier vers MinIO (BRONZE/dvf/<année>/...)"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        dest_filename = f"dvf/{year}/dvf_{year}_{timestamp}_{source_file.name}"
-        
+        key = f"dvf/{year}/dvf_{year}_{timestamp}_{source_file.name}"
+
         try:
-            # Upload vers MinIO
-            self.s3_client.upload_file(
-                str(source_file),
-                self.bucket_name,
-                dest_filename
-            )
-            logger.info(f"Fichier uploadé: {source_file.name} -> s3://{self.bucket_name}/{dest_filename}")
-            return dest_filename
+            self.s3_client.upload_file(str(source_file), self.bucket_name, key)
+            logger.info(f"Upload OK: {source_file.name} -> s3://{self.bucket_name}/{key}")
+            return key
         except ClientError as e:
-            logger.error(f"Erreur lors de l'upload de {source_file.name}: {e}")
+            logger.error(f"Erreur upload {source_file.name}: {e}")
             return None
-    
-    def process_file(self, file_path):
-        """Traite un fichier DVF individuel"""
-        logger.info(f"Traitement du fichier: {file_path.name}")
-        
-        # Détermination de l'année
+
+    def process_file(self, file_path: Path) -> bool:
+        """Traite un fichier DVF brut"""
+        logger.info(f"Traitement: {file_path.name}")
         year = self.determine_year_from_filename(file_path)
-        logger.info(f"Année déterminée: {year}")
-        
-        # Upload vers MinIO
-        dest_path = self.upload_to_minio(file_path, year)
-        
-        if dest_path:
-            # Vérification de la taille du fichier source
+        logger.info(f"Année détectée: {year}")
+
+        key = self.upload_to_minio(file_path, year)
+        if key:
             size_mb = file_path.stat().st_size / (1024 * 1024)
-            logger.info(f"Fichier traité avec succès: {file_path.name} ({size_mb:.2f} MB) -> {dest_path}")
+            logger.info(f"OK: {file_path.name} ({size_mb:.2f} MB) -> {key}")
             return True
         else:
-            logger.error(f"Échec du traitement du fichier: {file_path.name}")
+            logger.error(f"Échec: {file_path.name}")
             return False
-    
+
     def ingest_all(self):
-        """Ingère tous les fichiers DVF trouvés"""
+        """Ingère tous les fichiers DVF présents"""
         logger.info("=== INGESTION DVF TXT ===")
-        
-        # Recherche des fichiers
         files = self.find_dvf_files()
-        
         if not files:
-            logger.warning(f"Aucun fichier DVF trouvé dans {self.source_dir}")
+            logger.warning(f"Aucun fichier dans {self.source_dir}")
             return 0, 0
-        
-        # Traitement des fichiers
-        successful = 0
-        failed = 0
-        
-        for file_path in files:
-            if self.process_file(file_path):
-                successful += 1
+
+        ok, ko = 0, 0
+        for path in files:
+            if self.process_file(path):
+                ok += 1
             else:
-                failed += 1
-        
-        logger.info(f"=== INGESTION DVF TERMINÉE ===")
-        logger.info(f"Fichiers traités avec succès: {successful}")
-        logger.info(f"Fichiers en échec: {failed}")
-        logger.info(f"Total: {len(files)}")
-        
-        return successful, failed
+                ko += 1
+
+        logger.info("=== INGESTION DVF TERMINÉE ===")
+        logger.info(f"Succès: {ok} | Échecs: {ko} | Total: {len(files)}")
+        return ok, ko
 
 def main():
-    """Fonction principale"""
-    logger.info("=== INGESTION DVF TXT ===")
-    
-    # Création de l'instance d'ingestion
-    dvf_ingestion = DVFIngestion()
-    
-    # Traitement de tous les fichiers
-    successful, failed = dvf_ingestion.ingest_all()
-    
-    if failed == 0:
+    logger.info("=== Lancement ingestion DVF ===")
+    dvf = DVFIngestion()
+    ok, ko = dvf.ingest_all()
+    if ko == 0:
         logger.info("✅ Tous les fichiers DVF ont été traités avec succès!")
     else:
-        logger.warning(f"⚠️ {failed} fichiers n'ont pas pu être traités")
+        logger.warning(f"⚠️ {ko} fichiers en échec")
 
 if __name__ == "__main__":
     main()
